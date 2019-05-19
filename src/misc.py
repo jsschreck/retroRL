@@ -5,11 +5,11 @@ import rdkit.Chem as Chem
 from rdkit.Chem import AllChem
 from multiprocessing import Pool
 from functools import partial
-from makeit.mcts.cost import MinCost
+from retroRL.src.cost import Reset, MinCost
+
 import numpy as np, glob 
 import gzip, time, random, shutil, itertools 
 import os, traceback, sys 
-from makeit.mcts.cost import Reset, MinCost
 
 def mol_to_fp(mol, FINGERPRINT_SIZE = 16384, FP_rad = 3):
     if mol is None:

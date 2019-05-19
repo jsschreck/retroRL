@@ -1,16 +1,17 @@
-from makeit.retrosynthetic.transformer import RetroTransformer
-from makeit.retrosynthetic.results import RetroResult, RetroPrecursor
-from makeit.utilities.buyable.pricer import Pricer
+from retroRL.templates.transformer import RetroTransformer 
+
 from multiprocessing import Process, Manager, Queue
 from multiprocessing import Pool
 from pymongo import MongoClient
 import gc as gc_gzip
 
-from makeit.mcts.cost import Reset, score_max_depth, score_no_templates, MinCost, BuyablePathwayCount
-from makeit.mcts.misc import get_feature_vec, save_sparse_tree
-from makeit.mcts.misc import greedy_training_states, value_network_training_states
-from makeit.mcts.nodes import Chemical, Reaction
-from makeit.mcts.smiles_loader import smilesLoader
+from retroRL.src.cost import Reset, score_max_depth, score_no_templates, MinCost, BuyablePathwayCount
+from retroRL.src.misc import get_feature_vec, save_sparse_tree
+from retroRL.src.misc import greedy_training_states, value_network_training_states
+from retroRL.src.nodes import Chemical, Reaction 
+from retroRL.src.smiles_loader import smilesLoader, ResetCostEstimate
+from retroRL.src.results import RetroResult, RetroPrecursor
+from retroRL.buyable.pricer import Pricer
 
 import makeit.global_config as gc
 from functools import partial
@@ -78,42 +79,24 @@ class TreeGenerator:
 			self.pricer = pricer
 		else:
 			self.pricer = Pricer()
-		self.pricer.load_from_file()
+		self.pricer.load_from_file(file_path='buyable/buyable')
 
 		self.reset()
-
-		self.retroTransformer = None
-
-		## Load template transformer using Make-It.
-		db_client = MongoClient(gc.MONGO['path'], gc.MONGO['id'],
-								connect=gc.MONGO['connect']
-								)
-		TEMPLATE_DB = db_client[gc.RETRO_TRANSFORMS_CHIRAL['database']][gc.RETRO_TRANSFORMS_CHIRAL['collection']]
+	
+		# Load templates from pkl file
 		self.retroTransformer = RetroTransformer(
 			mincount=self.mincount, mincount_chiral=self.mincount_chiral,
-			TEMPLATE_DB=TEMPLATE_DB
+			TEMPLATE_DB=None
 			)
 		self.retroTransformer.chiral = self.chiral
-		home = os.path.expanduser('~')
-		if home.split("/")[1] == "rigel":
-			home = "/rigel/cheme/users/jss2278/chemical_networks"
-		transformer_filepath = home + "/Make-It/makeit/data/"
-		if os.path.isfile(transformer_filepath+"chiral_templates.pickle"):
-			self.retroTransformer.load_from_file(
-				True, "chiral_templates.pickle", chiral=self.chiral, rxns=True,
-				file_path=transformer_filepath
-				)
-		else:
-			self.retroTransformer.dump_to_file(
-				True, "chiral_templates.pickle", chiral=self.chiral,
-				file_path=transformer_filepath
-				)
+		self.retroTransformer.load_from_file(
+			True, "templates/chiral_templates.pickle", 
+			chiral=self.chiral, 
+			rxns=True)
 
 		# Define method to start up parallelization.
 		def prepare():
 			print 'Tree builder spinning off {} child processes'.format(self.nproc)
-			#MyLogger.print_and_log('Tree builder spinning off {} child processes'.format(
-			#	self.nproc), treebuilder_loc)
 			for i in range(self.nproc):
 				p = Process(target=self.work, args=(i,))
 				self.workers.append(p)
@@ -163,39 +146,11 @@ class TreeGenerator:
 			if not self.running:
 				return
 			self.done.value = 1
-			#MyLogger.print_and_log('Terminating tree building process.', treebuilder_loc)
 			for p in self.workers:
 				if p and p.is_alive():
 					p.terminate()
-			#MyLogger.print_and_log('All tree building processes done.', treebuilder_loc)
 			self.running = False
 		self.stop = stop
-
-	# Has no self dependencies, move to another script in future
-	def ResetCostEstimate(self, Chemicals, Reactions, reset_only_estimate = False):
-		for c in Chemicals.values():
-			if len(c.rewards):
-				c.cost_estimate = np.mean(c.rewards)
-			else:
-				try:
-					if np.isfinite(c.cost_estimate):
-						pass
-					else:
-						c.cost_estimate = float("inf")
-				except:
-					c.cost_estimate = float("inf")
-
-		for r in Reactions.values():
-			if len(r.rewards):
-				r.cost_estimate = np.mean(r.rewards)
-			else:
-				try:
-					if np.isfinite(r.cost_estimate):
-						pass
-					else:
-						r.cost_estimate = float("inf")
-				except:
-					r.cost_estimate = float("inf")
 
 	# pricer for self
 	def get_price(self, chem_smi):
@@ -207,8 +162,8 @@ class TreeGenerator:
 
 	# model for self
 	def estimate_current_cost(self):
-		from makeit.prioritization.precursors.mincost import MinCostPrecursorPrioritizer
-		model = MinCostPrecursorPrioritizer()
+		from retroRL.prioritizers.cost import CostPrecursorPrioritizer
+		model = CostPrecursorPrioritizer()
 		model.load_model(datapath = self.model_weights + '/')
 		return model
 
@@ -551,8 +506,8 @@ class TreeGenerator:
 	def work(self, i):
 
 		if self.precursor_prioritization == gc.mincost and bool(self.model_weights):
-			from makeit.prioritization.precursors.mincost import MinCostPrecursorPrioritizer
-			model = MinCostPrecursorPrioritizer()
+			from retroRL.prioritizers.cost import CostPrecursorPrioritizer
+			model = CostPrecursorPrioritizer()
 
 			# On occasion we get a crash when trying to load model -- multiproc
 			# issue with locks not being handled (released) properly by theano.
@@ -584,8 +539,6 @@ class TreeGenerator:
 				prioritizers = (self.precursor_prioritization,
 								self.template_prioritization
 								)
-
-				#print jj, smiles, depth, branching, outcomes
 
 				if not outcomes:
 
@@ -635,6 +588,7 @@ class TreeGenerator:
 
 			precursors, outcomes = rxn_precursors
 			pathway['chemical_nodes'][(chem_smi,depth)].processed = True
+			#
 			# If no templates applied, do not go further, chemical not makeable.
 			if not precursors:
 				C[chem_smi,depth].retro_results = []
@@ -648,6 +602,7 @@ class TreeGenerator:
 				retroscore = result['score']
 				template_action = result['tforms']
 				template_probability = result['template_score']
+				#
 				# Reject cyclic templates as 'illegal moves'.
 				cyclic_template = False
 				for q,smi in enumerate(reactants):
@@ -787,9 +742,7 @@ class TreeGenerator:
 		except Exception as e:
 			print "Error in expand_products:", traceback.format_exc()
 
-	# Has not many self dependencies, maybe move to another script in future
-	# Should anyways so UCT, etc may be substituted in.
-	# Leaf_Generator may also be good to put into this class
+	# Not many 'self' dependencies, maybe move to another script in future
 	def epsilon_greedy(self, _id, product_key, pathway):
 		try:
 			C = self.crns[_id][0]
@@ -1114,10 +1067,6 @@ class TreeGenerator:
 				for _id in range(self.nproc):
 					self.pathways[_id] = 0
 
-
-				### SHOULD BE REDUNDANT ...
-
-
 				# Do not add targets if we have the desired number of attempts
 				if not len(self.current_crns.values()):
 					break
@@ -1212,7 +1161,6 @@ class TreeGenerator:
 		self.max_penalty = score_no_templates()
 
 		self.manager = Manager()
-		# specificly for python multiprocessing
 		self.done = self.manager.Value('i', 0)
 		self.paused = self.manager.Value('i', 0)
 		# Keep track of idle workers
